@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>bci.blue — tileable gain-of-function</title>
+<meta name="theme-color" content="#0a0a0a">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050508;overflow:hidden;height:100vh;width:100vw;font-family:'SF Mono','Fira Code',monospace}
+canvas{position:absolute;top:0;left:0}
+#grid-canvas{z-index:1}
+#fx-canvas{z-index:2;pointer-events:none}
+#scope-canvas{z-index:3;pointer-events:none}
+#hud{
+  position:fixed;bottom:0;left:0;right:0;z-index:10;
+  display:flex;align-items:center;gap:12px;
+  padding:4px 10px;
+  background:rgba(5,5,8,0.85);
+  border-top:1px solid #1a1a2a;
+  font-size:11px;color:#555;
+}
+#hud .v{color:#999}
+#hud .b{color:#3B82F6}
+#hud .r{color:#EF4444}
+#hud .p{color:#8B3FA6}
+#hud .g{color:#22c55e}
+#hud .speed{margin-left:auto;color:#444}
+#loading{
+  position:fixed;inset:0;z-index:100;
+  display:flex;align-items:center;justify-content:center;
+  background:#050508;color:#8B3FA6;font-size:14px;
+  font-family:'SF Mono',monospace;
+}
+.pulse{animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+</style>
+</head>
+<body>
+<div id="loading"><span class="pulse">initializing wasm...</span></div>
+<canvas id="grid-canvas"></canvas>
+<canvas id="fx-canvas"></canvas>
+<canvas id="scope-canvas"></canvas>
+<div id="hud">
+  <span>gen:<span class="v" id="h-gen">0</span></span>
+  <span class="b">E:<span class="v" id="h-e">0</span></span>
+  <span class="r">I:<span class="v" id="h-i">0</span></span>
+  <span class="p">R:<span class="v" id="h-r">0</span></span>
+  <span class="g">V:<span class="v" id="h-v">0</span></span>
+  <span>GF3:<span class="v" id="h-t">0</span></span>
+  <span class="speed" id="h-help">[r]un [space]step [i]nfect [v]ax [s]aturate [+/-]speed</span>
+</div>
+<script>
+const W = window.innerWidth, H = window.innerHeight - 24;
+const CELL = 6;
+const COLS = Math.floor(W / CELL);
+const ROWS = Math.floor(H / CELL);
+const TC = Math.min(8, Math.max(2, Math.floor(COLS / 12)));
+const TR = Math.min(8, Math.max(2, Math.floor(ROWS / 8)));
+
+const gc = document.getElementById('grid-canvas');
+const fc = document.getElementById('fx-canvas');
+const sc = document.getElementById('scope-canvas');
+const gx = gc.getContext('2d');
+const fx = fc.getContext('2d');
+const sx = sc.getContext('2d');
+
+const dpr = window.devicePixelRatio || 1;
+[gc,fc,sc].forEach(c => {
+  c.width = W * dpr; c.height = (H + 24) * dpr;
+  c.style.width = W + 'px'; c.style.height = (H + 24) + 'px';
+  c.getContext('2d').scale(dpr, dpr);
+});
+
+const SCOPE_H = Math.min(80, Math.floor(H * 0.12));
+const SCOPE_Y = H - SCOPE_H;
+const HISTORY_LEN = 300;
+const history = { empty:[], infected:[], recomb:[], immune:[] };
+
+let wasm, running = false, animId = null, speed = 3, frameCount = 0;
+
+function unpackRGB(p) {
+  return [(p>>16)&0xff, (p>>8)&0xff, p&0xff];
+}
+
+function renderGrid() {
+  const total = wasm.tgof_render();
+  const cols = wasm.tgof_cols();
+  const rows = wasm.tgof_rows();
+
+  gx.fillStyle = '#050508';
+  gx.fillRect(0, 0, W, H);
+
+  for (let y = 0; y < rows && y < ROWS; y++) {
+    for (let x = 0; x < cols && x < COLS; x++) {
+      const idx = y * cols + x;
+      if (idx >= total) break;
+      const bg = wasm.tgof_cell_bg(idx);
+      const fg = wasm.tgof_cell_fg(idx);
+      const [br, bg2, bb] = unpackRGB(bg);
+      const [fr, fg2, fb] = unpackRGB(fg);
+
+      const px = x * CELL, py = y * CELL;
+
+      if (br + bg2 + bb > 30) {
+        gx.fillStyle = `rgb(${br},${bg2},${bb})`;
+        gx.fillRect(px, py, CELL, CELL);
+      }
+
+      const cp = wasm.tgof_cell_cp(idx);
+      if (cp > 32 && (fr + fg2 + fb > 60)) {
+        gx.fillStyle = `rgb(${fr},${fg2},${fb})`;
+        gx.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+      }
+    }
+  }
+}
+
+function renderGlow() {
+  fx.clearRect(0, 0, W, H + 24);
+  fx.globalCompositeOperation = 'lighter';
+  fx.drawImage(gc, 0, 0, W, H + 24);
+  fx.filter = 'blur(3px) brightness(0.4)';
+  fx.drawImage(gc, 0, 0, W, H + 24);
+  fx.filter = 'blur(8px) brightness(0.15)';
+  fx.drawImage(gc, 0, 0, W, H + 24);
+  fx.filter = 'none';
+  fx.globalCompositeOperation = 'source-over';
+
+  // scanlines
+  fx.fillStyle = 'rgba(0,0,0,0.06)';
+  for (let y = 0; y < H; y += 3) {
+    fx.fillRect(0, y, W, 1);
+  }
+}
+
+function pushHistory() {
+  const e = wasm.tgof_census_empty();
+  const i = wasm.tgof_census_infected();
+  const r = wasm.tgof_census_recombinant();
+  const v = wasm.tgof_census_immune();
+  history.empty.push(e);
+  history.infected.push(i);
+  history.recomb.push(r);
+  history.immune.push(v);
+  if (history.empty.length > HISTORY_LEN) {
+    history.empty.shift(); history.infected.shift();
+    history.recomb.shift(); history.immune.shift();
+  }
+}
+
+function renderScope() {
+  sx.clearRect(0, SCOPE_Y - 2, W, SCOPE_H + 26);
+
+  // scope background
+  sx.fillStyle = 'rgba(5,5,8,0.75)';
+  sx.fillRect(0, SCOPE_Y, W, SCOPE_H);
+
+  // top border glow
+  sx.strokeStyle = 'rgba(139,63,166,0.3)';
+  sx.lineWidth = 1;
+  sx.beginPath();
+  sx.moveTo(0, SCOPE_Y);
+  sx.lineTo(W, SCOPE_Y);
+  sx.stroke();
+
+  if (history.empty.length < 2) return;
+
+  const total = Math.max(1, (history.empty[0] || 0) + (history.infected[0] || 0) + (history.recomb[0] || 0) + (history.immune[0] || 0));
+  const len = history.empty.length;
+  const xStep = W / HISTORY_LEN;
+
+  function drawTrace(arr, color, alpha) {
+    sx.strokeStyle = color;
+    sx.lineWidth = 1.5;
+    sx.globalAlpha = alpha;
+    sx.beginPath();
+    for (let i = 0; i < len; i++) {
+      const x = (HISTORY_LEN - len + i) * xStep;
+      const v = (arr[i] / total) * SCOPE_H * 0.9;
+      const y = SCOPE_Y + SCOPE_H - v - 2;
+      if (i === 0) sx.moveTo(x, y); else sx.lineTo(x, y);
+    }
+    sx.stroke();
+    sx.globalAlpha = 1;
+  }
+
+  drawTrace(history.infected, '#EF4444', 0.9);
+  drawTrace(history.recomb, '#8B3FA6', 0.8);
+  drawTrace(history.immune, '#22c55e', 0.7);
+  drawTrace(history.empty, '#3B82F6', 0.4);
+
+  // glow pass on scope
+  sx.filter = 'blur(4px) brightness(0.5)';
+  sx.globalCompositeOperation = 'lighter';
+  drawTrace(history.infected, '#EF4444', 0.4);
+  drawTrace(history.recomb, '#8B3FA6', 0.3);
+  drawTrace(history.immune, '#22c55e', 0.3);
+  sx.filter = 'none';
+  sx.globalCompositeOperation = 'source-over';
+
+  // grid lines
+  sx.strokeStyle = 'rgba(255,255,255,0.03)';
+  sx.lineWidth = 0.5;
+  for (let i = 1; i < 4; i++) {
+    const y = SCOPE_Y + (SCOPE_H * i / 4);
+    sx.beginPath(); sx.moveTo(0, y); sx.lineTo(W, y); sx.stroke();
+  }
+  for (let i = 0; i < HISTORY_LEN; i += 30) {
+    const x = i * xStep;
+    sx.beginPath(); sx.moveTo(x, SCOPE_Y); sx.lineTo(x, SCOPE_Y + SCOPE_H); sx.stroke();
+  }
+}
+
+function updateHUD() {
+  document.getElementById('h-gen').textContent = wasm.tgof_generation();
+  document.getElementById('h-e').textContent = wasm.tgof_census_empty();
+  document.getElementById('h-i').textContent = wasm.tgof_census_infected();
+  document.getElementById('h-r').textContent = wasm.tgof_census_recombinant();
+  document.getElementById('h-v').textContent = wasm.tgof_census_immune();
+  const t = wasm.tgof_trit_balance();
+  const te = document.getElementById('h-t');
+  te.textContent = t;
+  te.style.color = t === 0 ? '#8B3FA6' : t > 0 ? '#EF4444' : '#3B82F6';
+}
+
+function frame() {
+  frameCount++;
+  if (frameCount % Math.max(1, 4 - speed) === 0) {
+    wasm.tgof_tick();
+    pushHistory();
+  }
+  renderGrid();
+  renderGlow();
+  renderScope();
+  updateHUD();
+  if (running) animId = requestAnimationFrame(frame);
+}
+
+function singleTick() {
+  wasm.tgof_tick();
+  pushHistory();
+  renderGrid();
+  renderGlow();
+  renderScope();
+  updateHUD();
+}
+
+function seedLife() {
+  // Infect several tiles to make it interesting from the start
+  const tiles = wasm.tgof_tile_count();
+  for (let i = 0; i < Math.max(3, Math.floor(tiles * 0.4)); i++) {
+    if (Math.random() < 0.5) wasm.tgof_focus_next();
+    wasm.tgof_infect_focused(Math.floor(Math.random() * 3) + 1, Math.floor(Math.random() * 3));
+  }
+  // Run a few generations to get patterns forming
+  wasm.tgof_tick_saturate(30);
+  for (let i = 0; i < 30; i++) pushHistory();
+}
+
+async function init() {
+  const resp = await fetch('/tileable-gof.wasm');
+  const bytes = await resp.arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(bytes, { env: {} });
+  wasm = instance.exports;
+
+  wasm.tgof_init(COLS, ROWS, TC, TR);
+  seedLife();
+
+  document.getElementById('loading').style.display = 'none';
+
+  // auto-run
+  running = true;
+  frame();
+
+  document.addEventListener('keydown', (e) => {
+    switch (e.key) {
+      case ' ':
+        e.preventDefault();
+        if (running) { running = false; cancelAnimationFrame(animId); }
+        else singleTick();
+        break;
+      case 'r':
+        running = !running;
+        if (running) frame();
+        break;
+      case 'i':
+        wasm.tgof_infect_focused(Math.floor(Math.random()*3)+1, Math.floor(Math.random()*3));
+        if (!running) { renderGrid(); renderGlow(); updateHUD(); }
+        break;
+      case 'v':
+        wasm.tgof_vaccinate_focused();
+        if (!running) { renderGrid(); renderGlow(); updateHUD(); }
+        break;
+      case 'n': wasm.tgof_focus_next(); if(!running){renderGrid();renderGlow();} break;
+      case 'p': wasm.tgof_focus_prev(); if(!running){renderGrid();renderGlow();} break;
+      case 's':
+        wasm.tgof_tick_saturate(1000);
+        for(let i=0;i<100;i++){pushHistory();}
+        if(!running){renderGrid();renderGlow();renderScope();updateHUD();}
+        break;
+      case '+': case '=': speed = Math.min(5, speed + 1); break;
+      case '-': speed = Math.max(1, speed - 1); break;
+      case 'Enter':
+        e.preventDefault();
+        singleTick();
+        break;
+    }
+  });
+
+  // touch to infect
+  gc.addEventListener('click', (e) => {
+    wasm.tgof_infect_focused(Math.floor(Math.random()*3)+1, Math.floor(Math.random()*3));
+    wasm.tgof_focus_next();
+    if (!running) { renderGrid(); renderGlow(); updateHUD(); }
+  });
+}
+
+init().catch(e => {
+  document.getElementById('loading').innerHTML = 'error: ' + e.message;
+});
+</script>
+</body>
+</html>

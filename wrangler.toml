@@ -1,0 +1,28 @@
+name = "bci-blue-share"
+main = "src/index.ts"
+compatibility_date = "2026-03-29"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+routes = [
+  { pattern = "bci.blue/*", zone_name = "bci.blue" },
+  { pattern = "bci.blue", zone_name = "bci.blue" },
+  { pattern = "bci.red/*", zone_name = "bci.red" },
+  { pattern = "bci.red", zone_name = "bci.red" },
+  { pattern = "bci.horse/*", zone_name = "bci.horse" },
+  { pattern = "bci.horse", zone_name = "bci.horse" }
+]
+
+[[kv_namespaces]]
+binding = "SHARES"
+id = "f3d9b1c3232b44e5b3841ab8235400b4"
+
+[assets]
+directory = "./public"
+
+[vars]
+SITE_NAME = "bci.blue"
+OG_TITLE = "bci.blue"
+OG_DESCRIPTION = "Brain-Computer Interface Factory -- the pfeiffer color between blue and red"
+OG_IMAGE = "https://bci.blue/og.png"
+THEME_COLOR = "#3B82F6"
