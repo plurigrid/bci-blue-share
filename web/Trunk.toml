@@ -4,5 +4,8 @@ release = true
 dist = "../public"
 public_url = "/"
 
+[clean]
+dist = false
+
 [tools]
 wasm_bindgen = "0.2.118"
