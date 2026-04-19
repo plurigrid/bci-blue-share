@@ -1,3 +1,4 @@
+import { handleApi } from './api';
 export interface Env {
   SHARES: KVNamespace;
   ASSETS: Fetcher;
@@ -108,6 +109,9 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+    const apiResp = await handleApi(request, env);
+    if (apiResp) return apiResp;
+
 
     // CORS preflight
     if (request.method === 'OPTIONS') {
