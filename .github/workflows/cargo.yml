@@ -40,5 +40,6 @@ jobs:
       - uses: jetli/wasm-bindgen-action@v0.2.0
         with: { version: '0.2.118' }
       - run: cd web && trunk build --release
+      - run: cp -rv web/dist/* public/
       - uses: actions/upload-artifact@v4
         with: { name: web-dist, path: public, retention-days: 14 }
