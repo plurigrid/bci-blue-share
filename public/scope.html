@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bci.red ⊕ bci.blue — oscilloscope</title>
+<meta name="theme-color" content="#0a0a0a">
+<style>
+  :root {
+    --bg:#0a0a0a; --fg:#e6e6e6; --dim:#777; --red:#ef4444; --blue:#3b82f6;
+    --cyan:#22d3ee; --grid:#1a1a1a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--fg);
+    font-family: 'SF Mono','Fira Code','Menlo',monospace; font-size: 13px;
+    line-height: 1.35; }
+  body { padding: 0.75rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .top { display: flex; gap: 1rem; align-items: baseline; }
+  .top .red { color: var(--red); font-weight: 700; }
+  .top .blue { color: var(--blue); font-weight: 700; }
+  .top .dim { color: var(--dim); }
+  .bins { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;
+    flex: 1; min-height: 0; }
+  .bin { border: 1px solid var(--grid); padding: 0.5rem; overflow: auto;
+    display: flex; flex-direction: column; gap: 0.2rem; }
+  .bin.red { border-color: var(--red); }
+  .bin.blue { border-color: var(--blue); }
+  .bin h2 { font-size: 13px; font-weight: 700; margin-bottom: 0.4rem; }
+  .bin.red h2 { color: var(--red); }
+  .bin.blue h2 { color: var(--blue); }
+  .item { padding: 0.2rem 0.4rem; cursor: pointer; border: 1px solid transparent;
+    display: flex; gap: 0.5rem; align-items: baseline; }
+  .item:hover { background: var(--grid); }
+  .item.sel { background: #222; border-color: var(--cyan); }
+  .item .id { color: var(--dim); width: 4.5em; flex: none; }
+  .item .title { flex: 1; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .item .nums { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .item .nums b { color: var(--fg); }
+  .scope { border: 1px solid var(--grid); padding: 0.5rem; height: 90px;
+    display: flex; flex-direction: column; gap: 0.25rem; }
+  .scope .label { color: var(--dim); font-size: 11px; }
+  .scope canvas { width: 100%; height: 60px; image-rendering: pixelated; }
+  .status { display: flex; gap: 1rem; padding: 0 0.25rem;
+    font-variant-numeric: tabular-nums; }
+  .status .k { color: var(--dim); }
+  .status .red { color: var(--red); font-weight: 700; }
+  .status .blue { color: var(--blue); font-weight: 700; }
+  .status .cyan { color: var(--cyan); font-weight: 700; }
+  .help { color: var(--dim); padding: 0 0.25rem; font-size: 11px; }
+  kbd { background: var(--grid); padding: 1px 6px; border-radius: 3px;
+    color: var(--fg); }
+</style>
+</head>
+<body>
+  <div class="top">
+    <span class="red">bci.red</span><span class="dim">⊕</span><span class="blue">bci.blue</span>
+    <span class="dim">·</span><span class="dim">oscilloscope</span>
+    <span class="dim" id="count"></span>
+    <span class="dim" style="margin-left:auto" id="msg"></span>
+  </div>
+
+  <div class="bins">
+    <div class="bin red"><h2>bci.red <span class="dim" id="red-count"></span></h2><div id="red"></div></div>
+    <div class="bin blue"><h2>bci.blue <span class="dim" id="blue-count"></span></h2><div id="blue"></div></div>
+  </div>
+
+  <div class="scope">
+    <div class="label">scope: net (blue − red), last 120 ticks</div>
+    <canvas id="scope" width="600" height="60"></canvas>
+  </div>
+
+  <div class="status">
+    <span><span class="k">red</span> <span class="red" id="t-red">0</span></span>
+    <span><span class="k">blue</span> <span class="blue" id="t-blue">0</span></span>
+    <span><span class="k">abstain</span> <span id="t-abs">0</span></span>
+    <span><span class="k">total</span> <b id="t-total">0</b></span>
+    <span><span class="k">gf3</span> <span class="cyan" id="t-gf3">0</span></span>
+    <span style="margin-left:auto" class="k" id="age">—</span>
+  </div>
+
+  <div class="help">
+    <kbd>r</kbd> vote red &nbsp; <kbd>b</kbd> vote blue &nbsp; <kbd>space</kbd> abstain &nbsp;
+    <kbd>↑</kbd>/<kbd>↓</kbd> navigate &nbsp; <kbd>R</kbd> refresh &nbsp;
+    click an item to select &nbsp; same /api/* endpoints as the binary
+  </div>
+
+<script>
+const state = { items: [], aggs: {}, selected: null, history: new Array(120).fill(0), lastFetch: 0 };
+
+async function getJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(url + ' ' + r.status);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const cat = await getJSON('/api/catalog');
+    state.items = cat.items || [];
+    if (!state.selected && state.items.length) state.selected = state.items[0].id;
+    const agg = await getJSON('/api/agg');
+    state.aggs = agg.aggregates || {};
+    pushHistory();
+    state.lastFetch = Date.now();
+    render();
+  } catch (e) {
+    document.getElementById('msg').textContent = 'fetch err: ' + e.message;
+  }
+}
+
+function pushHistory() {
+  const net = Object.values(state.aggs).reduce((s, a) => s + (a.blue||0) - (a.red||0), 0);
+  state.history.push(net);
+  while (state.history.length > 120) state.history.shift();
+}
+
+async function vote(choice) {
+  if (!state.selected) return;
+  try {
+    const r = await getJSON('/api/vote', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({item: state.selected, choice})
+    });
+    state.aggs[state.selected] = r.agg;
+    pushHistory();
+    document.getElementById('msg').textContent = 'voted ' + label(choice) + ' on ' + state.selected;
+    render();
+  } catch (e) {
+    document.getElementById('msg').textContent = 'vote err: ' + e.message;
+  }
+}
+
+function label(c) { return c === -1 ? 'red' : c === 1 ? 'blue' : 'abstain'; }
+
+function render() {
+  document.getElementById('count').textContent = '(' + state.items.length + ' items)';
+  const red = state.items.filter(i => i.bin === 'red');
+  const blue = state.items.filter(i => i.bin === 'blue');
+  document.getElementById('red-count').textContent =
+    '── ' + red.reduce((s,i)=>s+(state.aggs[i.id]?.total||0),0) + ' votes';
+  document.getElementById('blue-count').textContent =
+    '── ' + blue.reduce((s,i)=>s+(state.aggs[i.id]?.total||0),0) + ' votes';
+  document.getElementById('red').innerHTML = red.map(itemHTML).join('');
+  document.getElementById('blue').innerHTML = blue.map(itemHTML).join('');
+  document.querySelectorAll('.item').forEach(el => {
+    el.onclick = () => { state.selected = el.dataset.id; render(); };
+  });
+
+  const tot = Object.values(state.aggs).reduce((s, a) => ({
+    red: s.red + (a.red||0), blue: s.blue + (a.blue||0),
+    abstain: s.abstain + (a.abstain||0), total: s.total + (a.total||0)
+  }), {red:0, blue:0, abstain:0, total:0});
+  document.getElementById('t-red').textContent = tot.red;
+  document.getElementById('t-blue').textContent = tot.blue;
+  document.getElementById('t-abs').textContent = tot.abstain;
+  document.getElementById('t-total').textContent = tot.total;
+  const net = tot.blue - tot.red;
+  document.getElementById('t-gf3').textContent = ((net % 3) + 3) % 3;
+  drawScope();
+}
+
+function itemHTML(it) {
+  const a = state.aggs[it.id] || {red:0, blue:0, abstain:0, total:0};
+  const net = (a.blue||0) - (a.red||0);
+  const sel = it.id === state.selected ? ' sel' : '';
+  return '<div class="item' + sel + '" data-id="' + it.id + '">' +
+    '<span class="id">' + it.id + '</span>' +
+    '<span class="title">' + escHtml(it.title) + '</span>' +
+    '<span class="nums">↑<b>' + a.blue + '</b> ↓<b>' + a.red + '</b> ø' + a.abstain +
+    ' net ' + (net >= 0 ? '+' : '') + net + '</span></div>';
+}
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function drawScope() {
+  const c = document.getElementById('scope');
+  const ctx = c.getContext('2d');
+  const w = c.width, h = c.height;
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.moveTo(0, h/2); ctx.lineTo(w, h/2); ctx.stroke();
+  const max = Math.max(1, ...state.history.map(v => Math.abs(v)));
+  const step = w / state.history.length;
+  ctx.strokeStyle = '#22d3ee';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  state.history.forEach((v, i) => {
+    const x = i * step;
+    const y = h/2 - (v / max) * (h/2 - 2);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function tickAge() {
+  if (!state.lastFetch) return;
+  const s = Math.floor((Date.now() - state.lastFetch) / 1000);
+  document.getElementById('age').textContent = 'last fetch ' + s + 's ago';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'r') vote(-1);
+  else if (e.key === 'b') vote(1);
+  else if (e.key === ' ') { e.preventDefault(); vote(0); }
+  else if (e.key === 'R') refresh();
+  else if (e.key === 'ArrowDown' || e.key === 'j') navigate(1);
+  else if (e.key === 'ArrowUp' || e.key === 'k') navigate(-1);
+});
+
+function navigate(dir) {
+  if (!state.items.length) return;
+  const idx = state.items.findIndex(i => i.id === state.selected);
+  const ni = ((idx + dir) % state.items.length + state.items.length) % state.items.length;
+  state.selected = state.items[ni].id;
+  render();
+}
+
+refresh();
+setInterval(refresh, 15000);
+setInterval(tickAge, 1000);
+</script>
+</body>
+</html>
