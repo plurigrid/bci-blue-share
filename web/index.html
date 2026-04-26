@@ -6,18 +6,7 @@
   <title>bci.red ⊕ bci.blue</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧠</text></svg>" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/fira_code.min.css" />
-  
-<script type="module">
-import init, * as bindings from '/bci-web-8af623c9f2d03625.js';
-const wasm = await init({ module_or_path: '/bci-web-8af623c9f2d03625_bg.wasm' });
-
-
-window.wasmBindings = bindings;
-
-
-dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
-
-</script>
+  <link data-trunk rel="rust"/>
   <style>
     html, body { margin: 0; padding: 0; }
     body {
@@ -32,6 +21,6 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
       font-size: 14px; line-height: 1.1; margin: 0;
     }
   </style>
-<link rel="modulepreload" href="/bci-web-8af623c9f2d03625.js" crossorigin="anonymous" integrity="sha384-8HzYOaJorPfJELim1XEXG0Vejl0A/kKEnsR3+acDqySOahY5fDHgDTUad+WULPfm"><link rel="preload" href="/bci-web-8af623c9f2d03625_bg.wasm" crossorigin="anonymous" integrity="sha384-iCSWnuvZELIk1Wi7ME2QigShyE0zrBTIyCx61a3j+hgGOmpSjsv6M8ddoL5qK2CC" as="fetch" type="application/wasm"></head>
+</head>
 <body></body>
 </html>
